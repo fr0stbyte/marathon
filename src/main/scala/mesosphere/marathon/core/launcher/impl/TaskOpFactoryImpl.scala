@@ -88,13 +88,14 @@ class TaskOpFactoryImpl @Inject() (
      */
 
     lazy val matchingVolumes = PersistentVolumeMatcher.matchVolumes(offer, app, waitingTasks)
+    // FIXME: must take volume resources into consideration
     lazy val matchingResources = ResourceMatcher.matchResources(offer, app, tasks, acceptedResourceRoles)
 
     val taskOp: Option[TaskOp] = if (needToLaunch && matchingVolumes.isDefined && matchingResources.isDefined) {
       launch(app, offer, matchingVolumes.get.task, matchingResources, matchingVolumes)
     }
     else if (needToReserve && matchingResources.isDefined) {
-      matchingResources.map(resourceMatch => reserveAndCreateVolumes(app, offer, resourceMatch))
+      matchingResources.map(resourceMatch =>  reserveAndCreateVolumes(app, offer, resourceMatch))
     }
     else {
       None
