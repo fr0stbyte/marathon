@@ -10,17 +10,20 @@ import com.codahale.metrics.annotation.Timed
 import mesosphere.marathon.api.v2.json.Formats._
 import mesosphere.marathon.api.v2.json.GroupUpdate
 import mesosphere.marathon.api.{ AuthResource, MarathonMediaType }
+import mesosphere.marathon.core.appinfo.{ GroupInfo, GroupInfoService }
 import mesosphere.marathon.plugin.auth._
 import mesosphere.marathon.state.PathId._
 import mesosphere.marathon.state._
 import mesosphere.marathon.upgrade.DeploymentPlan
 import mesosphere.marathon.{ UnknownGroupException, ConflictingChangeException, MarathonConf }
 import play.api.libs.json.{ Json, Writes }
+import scala.collection.JavaConverters._
 
 @Path("v2/groups")
 @Produces(Array(MarathonMediaType.PREFERRED_APPLICATION_JSON))
 class GroupsResource @Inject() (
     groupManager: GroupManager,
+    groupInfoService: GroupInfoService,
     val authenticator: Authenticator,
     val authorizer: Authorizer,
     val config: MarathonConf) extends AuthResource {
@@ -37,7 +40,8 @@ class GroupsResource @Inject() (
     */
   @GET
   @Timed
-  def root(@Context req: HttpServletRequest): Response = group("/", req)
+  def root(@Context req: HttpServletRequest, @QueryParam("embed") embed: java.util.Set[String]): Response =
+    group("/", embed, req)
 
   /**
     * Get a specific group, optionally with specific version
@@ -48,13 +52,14 @@ class GroupsResource @Inject() (
   @Path("""{id:.+}""")
   @Timed
   def group(@PathParam("id") id: String,
+            @QueryParam("embed") embed: java.util.Set[String],
             @Context req: HttpServletRequest): Response = authenticated(req) { implicit identity =>
     //format:off
-    def groupResponse[T](id: PathId, fn: Group => T, version: Option[Timestamp] = None)(
+    def groupResponse[T](id: PathId, fn: GroupInfo => T, version: Option[Timestamp] = None)(
       implicit writes: Writes[T]): Response = {
       //format:on
       result(version.map(groupManager.group(id, _)).getOrElse(groupManager.group(id))) match {
-        case Some(group) => ok(jsonString(fn(authorizedView(group))))
+        case Some(group) => ok(jsonString(fn(authorizedView(group, embed))))
         case None        => unknownGroup(id, version)
       }
     }
@@ -250,15 +255,21 @@ class GroupsResource @Inject() (
     (deployment, effectivePath)
   }
 
-  private[this] def authorizedView(root: Group)(implicit identity: Identity): Group = {
+  private[this] def authorizedView(root: Group, embed: java.util.Set[String])(implicit ident: Identity): GroupInfo = {
     def authorizedToViewApp(app: AppDefinition): Boolean = isAuthorized(ViewApp, app)
     val visibleGroups = root.transitiveGroups.filter(group => isAuthorized(ViewGroup, group)).map(_.id)
     val parents = visibleGroups.flatMap(_.allParents) -- visibleGroups
 
-    root.updateGroup { subGroup =>
+    val viewable = root.updateGroup { subGroup =>
       if (visibleGroups.contains(subGroup.id)) Some(subGroup)
       else if (parents.contains(subGroup.id)) Some(subGroup.copy(apps = subGroup.apps.filter(authorizedToViewApp)))
       else None
     }.getOrElse(Group.empty) // fallback, if root is not allowed
+
+    //for backward compatibility, we always render apps and groups, if nothing is given
+    import InfoEmbedResolver._
+    val embeds = if (embed.isEmpty) Set(EmbedApps, EmbedGroups) else embed.asScala.toSet
+    val (appResolve, groupResolve) = resolveAppGroup(embeds)
+    result(groupInfoService.queryForGroup(viewable, appResolve, groupResolve))
   }
 }

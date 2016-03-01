@@ -3,12 +3,14 @@ package mesosphere.marathon.api.v2
 import mesosphere.marathon.api.{ TestGroupManagerFixture, TestAuthFixture }
 import mesosphere.marathon.api.v2.json.Formats._
 import mesosphere.marathon.api.v2.json.GroupUpdate
+import mesosphere.marathon.core.appinfo.{ AppInfo, GroupInfo, GroupInfoService }
 import mesosphere.marathon.state.PathId._
 import mesosphere.marathon.state._
 import mesosphere.marathon.test.Mockito
 import mesosphere.marathon.{ UnknownGroupException, MarathonConf, MarathonSpec }
 import org.scalatest.{ GivenWhenThen, Matchers }
 import play.api.libs.json.{ JsObject, Json }
+import scala.collection.JavaConverters._
 
 import scala.concurrent.Future
 import scala.concurrent.duration._
@@ -49,12 +51,12 @@ class GroupsResourceTest extends MarathonSpec with Matchers with Mockito with Gi
     groupManager.rootGroup() returns Future.successful(Group(PathId.empty))
 
     When(s"the root is fetched from index")
-    val root = groupsResource.root(req)
+    val root = groupsResource.root(req, embed)
     Then("we receive a NotAuthenticated response")
     root.getStatus should be(auth.NotAuthenticatedStatus)
 
     When(s"the group by id is fetched from create")
-    val group = groupsResource.group("/foo/bla", req)
+    val group = groupsResource.group("/foo/bla", embed, req)
     Then("we receive a NotAuthenticated response")
     group.getStatus should be(auth.NotAuthenticatedStatus)
 
@@ -177,7 +179,7 @@ class GroupsResourceTest extends MarathonSpec with Matchers with Mockito with Gi
     groupManager.group(PathId.empty) returns Future.successful(Some(group))
 
     When("The root group is fetched")
-    val root = groupsResource.root(auth.request)
+    val root = groupsResource.root(auth.request, embed)
 
     Then("The root group contains only entities according to ACL's")
     root.getStatus should be (200)
@@ -197,7 +199,7 @@ class GroupsResourceTest extends MarathonSpec with Matchers with Mockito with Gi
     groupManager.group(PathId.empty) returns Future.successful(Some(Group(PathId.empty)))
 
     When("The versions are queried")
-    val rootVersionsResponse = groupsResource.group("versions", auth.request)
+    val rootVersionsResponse = groupsResource.group("versions", embed, auth.request)
 
     Then("The versions are send as simple json array")
     rootVersionsResponse.getStatus should be (200)
@@ -212,7 +214,7 @@ class GroupsResourceTest extends MarathonSpec with Matchers with Mockito with Gi
     groupManager.group("/foo/bla/blub".toRootPath) returns Future.successful(Some(Group("/foo/bla/blub".toRootPath)))
 
     When("The versions are queried")
-    val rootVersionsResponse = groupsResource.group("/foo/bla/blub/versions", auth.request)
+    val rootVersionsResponse = groupsResource.group("/foo/bla/blub/versions", embed, auth.request)
 
     Then("The versions are send as simple json array")
     rootVersionsResponse.getStatus should be (200)
@@ -224,12 +226,24 @@ class GroupsResourceTest extends MarathonSpec with Matchers with Mockito with Gi
   var groupRepository: GroupRepository = _
   var groupsResource: GroupsResource = _
   var auth: TestAuthFixture = _
+  var groupInfo: GroupInfoService = _
+  var embed: java.util.Set[String] = _
 
   before {
     auth = new TestAuthFixture
     config = mock[MarathonConf]
     groupManager = mock[GroupManager]
-    groupsResource = new GroupsResource(groupManager, auth.auth, auth.auth, config)
+    groupInfo = mock[GroupInfoService]
+    groupInfo.queryForGroup(any[Group], any[Set[AppInfo.Embed]], any[Set[GroupInfo.Embed]]) answers { args =>
+      def info(group: Group): GroupInfo = {
+        val apps = group.apps.toSeq.map(AppInfo(_))
+        val groups = group.groups.toSeq.map(info)
+        GroupInfo(group, Some(apps), Some(groups))
+      }
+      Future.successful(info(args(0).asInstanceOf[Group]))
+    }
+    groupsResource = new GroupsResource(groupManager, groupInfo, auth.auth, auth.auth, config)
+    embed = Set.empty[String].asJava
 
     config.zkTimeoutDuration returns 1.second
   }
@@ -242,6 +256,6 @@ class GroupsResourceTest extends MarathonSpec with Matchers with Mockito with Gi
 
     config.zkTimeoutDuration returns 1.second
 
-    groupsResource = new GroupsResource(groupManager, auth.auth, auth.auth, config)
+    groupsResource = new GroupsResource(groupManager, groupInfo, auth.auth, auth.auth, config)
   }
 }
